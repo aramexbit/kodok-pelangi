@@ -1,0 +1,842 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kodok Pelangi - Zuma Puzzle</title>
+<style>
+*{box-sizing:border-box}
+body{
+  margin:0;min-height:100vh;background:#071b23;
+  display:flex;align-items:center;justify-content:center;
+  font-family:Arial,sans-serif;color:white;
+}
+#gameWrap{
+  width:min(100vw,800px);
+  position:relative;
+}
+canvas{
+  width:100%;height:auto;display:block;
+  background:#103d42;border:3px solid #64d6b5;
+  border-radius:12px;cursor:crosshair;
+  box-shadow:0 12px 45px #0009;
+  touch-action:manipulation;
+}
+#hint{
+  text-align:center;color:#b5e9dc;
+  font-size:12px;padding:9px;
+}
+</style>
+</head>
+<body>
+<div id="gameWrap">
+<canvas id="game" width="800" height="600"></canvas>
+<div id="hint">
+  Mouse: arahkan & klik untuk menembak · Klik kanan / Spasi: tukar bola · P: jeda
+</div>
+</div>
+
+<script>
+"use strict";
+
+/* =====================================
+   KODOK PELANGI - ZUMA PUZZLE
+   Single file offline game
+===================================== */
+
+const canvas=document.getElementById("game");
+const ctx=canvas.getContext("2d");
+
+const W=800,H=600;
+const CX=400,CY=300;
+const R=13;
+const GAP=27;
+
+const COLORS=[
+ "#ff454f",
+ "#ffd43b",
+ "#35dc8a",
+ "#399cff",
+ "#bd65ff"
+];
+
+const LEVELS=[
+ {colors:4,total:60,speed:37,turns:1.25},
+ {colors:5,total:80,speed:48,turns:2}
+];
+
+let state="menu";
+let level=1;
+let score=0;
+let lives=3;
+let chain=[];
+let speed=37;
+let total=60;
+let remaining=60;
+let pathLength=0;
+let pathPoints=[];
+let angle=0;
+let mouse={x:400,y:300};
+let frogAngle=0;
+let currentBall=0;
+let nextBall=1;
+let particles=[];
+let floatingTexts=[];
+let explosions=[];
+let combo=0;
+let comboTimer=0;
+let shotCooldown=0;
+let lastTime=0;
+let audio=null;
+let muted=false;
+let bgTime=0;
+let shake=0;
+
+/* Audio Web API */
+
+function sound(freq=440,duration=.1,type="sine",volume=.08){
+ if(muted)return;
+ try{
+  audio=audio||new (window.AudioContext||window.webkitAudioContext)();
+  if(audio.state==="suspended")audio.resume();
+  const osc=audio.createOscillator();
+  const gain=audio.createGain();
+  osc.type=type;
+  osc.frequency.setValueAtTime(freq,audio.currentTime);
+  gain.gain.setValueAtTime(volume,audio.currentTime);
+  gain.gain.exponentialRampToValueAtTime(.001,audio.currentTime+duration);
+  osc.connect(gain);gain.connect(audio.destination);
+  osc.start();osc.stop(audio.currentTime+duration);
+ }catch(e){}
+}
+
+function randomBall(){
+ return Math.floor(Math.random()*(LEVELS[level-1].colors));
+}
+
+/* Spiral path */
+
+function makePath(){
+ const turns=LEVELS[level-1].turns;
+ const samples=1800;
+ pathPoints=[];
+ let length=0,previous=null;
+ const startAngle=-Math.PI/2;
+ for(let i=0;i<=samples;i++){
+  const t=i/samples;
+  const a=startAngle+t*turns*Math.PI*2;
+  const radius=245-155*t;
+  const x=CX+Math.cos(a)*radius;
+  const y=CY+Math.sin(a)*radius;
+  if(previous)length+=Math.hypot(x-previous.x,y-previous.y);
+  pathPoints.push({x,y,d:length});
+  previous={x,y};
+ }
+ pathLength=length;
+}
+
+function pointAt(distance){
+ distance=Math.max(0,Math.min(pathLength,distance));
+ let lo=0,hi=pathPoints.length-1;
+ while(lo<hi){
+  const mid=(lo+hi)>>1;
+  if(pathPoints[mid].d<distance)lo=mid+1;
+  else hi=mid;
+ }
+ const b=pathPoints[lo];
+ const a=pathPoints[Math.max(0,lo-1)];
+ const span=b.d-a.d;
+ const t=span>0?(distance-a.d)/span:0;
+ return {
+  x:a.x+(b.x-a.x)*t,
+  y:a.y+(b.y-a.y)*t,
+  angle:Math.atan2(b.y-a.y,b.x-a.x)
+ };
+}
+
+function initLevel(){
+ const cfg=LEVELS[level-1];
+ speed=cfg.speed;
+ total=cfg.total;
+ remaining=total;
+ chain=[];
+ makePath();
+ for(let i=0;i<total;i++){
+  chain.push({
+   d:(i-(total-1))*GAP,
+   color:randomBall(),
+   pulse:Math.random()*6
+  });
+ }
+ currentBall=randomBall();
+ nextBall=randomBall();
+ particles=[];
+ explosions=[];
+ floatingTexts=[];
+ combo=0;
+ comboTimer=0;
+}
+
+function startGame(){
+ level=1;score=0;lives=3;
+ initLevel();
+ state="playing";
+ sound(520,.15,"sine");
+}
+
+/* Background */
+
+function drawBackground(){
+ const g=ctx.createLinearGradient(0,0,0,H);
+ g.addColorStop(0,"#103e43");
+ g.addColorStop(.55,"#15514b");
+ g.addColorStop(1,"#092c37");
+ ctx.fillStyle=g;
+ ctx.fillRect(0,0,W,H);
+
+ // water light
+ for(let i=0;i<12;i++){
+  const x=(i*93+Math.sin(bgTime*.4+i)*18)%W;
+  const y=(i*57+Math.cos(bgTime*.3+i)*20)%H;
+  ctx.beginPath();
+  ctx.arc(x,y,18+Math.sin(bgTime+i)*4,0,Math.PI*2);
+  ctx.strokeStyle="rgba(135,240,210,.09)";
+  ctx.lineWidth=2;
+  ctx.stroke();
+ }
+
+ // aquatic plants
+ for(let i=0;i<11;i++){
+  const x=i*83+15;
+  ctx.strokeStyle="#24775d";
+  ctx.lineWidth=5;
+  ctx.beginPath();
+  ctx.moveTo(x,H);
+  ctx.quadraticCurveTo(x-20,H-45,x+Math.sin(i)*20,H-100);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.ellipse(x+12,H-65,9,22,-.5,0,Math.PI*2);
+  ctx.fillStyle="#31885e";
+  ctx.fill();
+ }
+}
+
+/* Path drawing */
+
+function drawPath(){
+ if(!pathPoints.length)return;
+ ctx.beginPath();
+ pathPoints.forEach((p,i)=>{
+  if(i===0)ctx.moveTo(p.x,p.y);
+  else ctx.lineTo(p.x,p.y);
+ });
+ ctx.lineCap="round";
+ ctx.lineJoin="round";
+ ctx.strokeStyle="#082a31";
+ ctx.lineWidth=37;
+ ctx.stroke();
+
+ ctx.strokeStyle="#568b70";
+ ctx.lineWidth=29;
+ ctx.stroke();
+
+ ctx.strokeStyle="rgba(184,218,139,.28)";
+ ctx.lineWidth=2;
+ ctx.setLineDash([5,10]);
+ ctx.stroke();
+ ctx.setLineDash([]);
+
+ // entrance
+ const start=pathPoints[0];
+ ctx.beginPath();
+ ctx.arc(start.x,start.y,23,0,Math.PI*2);
+ ctx.fillStyle="#17332e";
+ ctx.fill();
+ ctx.strokeStyle="#a2d5a0";
+ ctx.lineWidth=3;
+ ctx.stroke();
+
+ // hole
+ const end=pointAt(pathLength);
+ const grd=ctx.createRadialGradient(end.x,end.y,2,end.x,end.y,27);
+ grd.addColorStop(0,"#000");
+ grd.addColorStop(.65,"#10151a");
+ grd.addColorStop(1,"#536e54");
+ ctx.beginPath();
+ ctx.arc(end.x,end.y,27,0,Math.PI*2);
+ ctx.fillStyle=grd;
+ ctx.fill();
+ ctx.strokeStyle="#d2c58a";
+ ctx.lineWidth=3;
+ ctx.stroke();
+ ctx.fillStyle="#fff0b4";
+ ctx.font="bold 10px Arial";
+ ctx.textAlign="center";
+ ctx.fillText("LUBANG",end.x,end.y+40);
+}
+
+/* Ball drawing */
+
+function drawBall(x,y,color,r=R,pulse=0){
+ const c=COLORS[color];
+ const glow=ctx.createRadialGradient(x-5,y-6,1,x,y,r+5);
+ glow.addColorStop(0,"#ffffff");
+ glow.addColorStop(.18,c);
+ glow.addColorStop(.72,c);
+ glow.addColorStop(1,"#202030");
+
+ ctx.save();
+ ctx.shadowColor=c;
+ ctx.shadowBlur=7;
+ ctx.beginPath();
+ ctx.arc(x,y,r+Math.sin(pulse)*.4,0,Math.PI*2);
+ ctx.fillStyle=glow;
+ ctx.fill();
+ ctx.restore();
+
+ ctx.beginPath();
+ ctx.arc(x-4,y-5,3,0,Math.PI*2);
+ ctx.fillStyle="rgba(255,255,255,.6)";
+ ctx.fill();
+}
+
+function drawChain(){
+ for(const b of chain){
+  if(b.d<0||b.d>pathLength)continue;
+  const p=pointAt(b.d);
+  drawBall(p.x,p.y,b.color,R,b.pulse+bgTime*2);
+ }
+}
+
+/* Frog */
+
+function drawFrog(){
+ ctx.save();
+ ctx.translate(CX,CY);
+ ctx.rotate(frogAngle);
+
+ // shadow
+ ctx.beginPath();
+ ctx.ellipse(0,13,42,32,0,0,Math.PI*2);
+ ctx.fillStyle="#061c20";
+ ctx.fill();
+
+ // body
+ const body=ctx.createRadialGradient(-10,-12,3,0,0,40);
+ body.addColorStop(0,"#a6ff8b");
+ body.addColorStop(.55,"#48d66a");
+ body.addColorStop(1,"#167b4a");
+ ctx.fillStyle=body;
+ ctx.beginPath();
+ ctx.ellipse(0,5,35,34,0,0,Math.PI*2);
+ ctx.fill();
+
+ // feet
+ ctx.fillStyle="#43b95b";
+ for(const x of [-28,28]){
+  ctx.beginPath();
+  ctx.ellipse(x,25,12,7,x*.02,0,Math.PI*2);
+  ctx.fill();
+ }
+
+ // eyes
+ for(const x of [-17,17]){
+  ctx.beginPath();
+  ctx.arc(x,-21,13,0,Math.PI*2);
+  ctx.fillStyle="#5ce979";
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(x,-22,8,0,Math.PI*2);
+  ctx.fillStyle="white";
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(x+2,-22,4.5,0,Math.PI*2);
+  ctx.fillStyle="#172c2b";
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(x+3,-24,1.5,0,Math.PI*2);
+  ctx.fillStyle="white";
+  ctx.fill();
+ }
+
+ // mouth
+ ctx.beginPath();
+ ctx.arc(0,0,18,.25,Math.PI-.25);
+ ctx.strokeStyle="#145c39";
+ ctx.lineWidth=3;
+ ctx.stroke();
+
+ // cannon
+ ctx.rotate(-frogAngle);
+ const a=Math.atan2(mouse.y-CY,mouse.x-CX);
+ ctx.rotate(a);
+ ctx.fillStyle="#b4f78d";
+ ctx.beginPath();
+ ctx.roundRect(12,-9,38,18,8);
+ ctx.fill();
+ ctx.strokeStyle="#176c43";
+ ctx.lineWidth=3;
+ ctx.stroke();
+ ctx.restore();
+
+ // loaded ball
+ drawBall(CX+Math.cos(frogAngle)*2,CY+Math.sin(frogAngle)*2,
+          currentBall,10,bgTime);
+}
+
+/* Particles */
+
+function burst(x,y,color,big=false){
+ const count=big?28:12;
+ for(let i=0;i<count;i++){
+  const a=Math.random()*Math.PI*2;
+  const v=40+Math.random()*(big?210:100);
+  particles.push({
+   x,y,vx:Math.cos(a)*v,vy:Math.sin(a)*v,
+   life:.4+Math.random()*.5,
+   max:.9,size:2+Math.random()*5,
+   color:COLORS[color]
+  });
+ }
+ explosions.push({x,y,r:5,max:big?65:35,life:.3});
+}
+
+function updateEffects(dt){
+ for(let i=particles.length-1;i>=0;i--){
+  const p=particles[i];
+  p.x+=p.vx*dt;p.y+=p.vy*dt;
+  p.vx*=.97;p.vy*=.97;
+  p.life-=dt;
+  if(p.life<=0)particles.splice(i,1);
+ }
+ for(let i=explosions.length-1;i>=0;i--){
+  explosions[i].r+=180*dt;
+  explosions[i].life-=dt;
+  if(explosions[i].life<=0)explosions.splice(i,1);
+ }
+ for(let i=floatingTexts.length-1;i>=0;i--){
+  const t=floatingTexts[i];
+  t.y-=30*dt;t.life-=dt;
+  if(t.life<=0)floatingTexts.splice(i,1);
+ }
+}
+
+function drawEffects(){
+ for(const e of explosions){
+  ctx.beginPath();
+  ctx.arc(e.x,e.y,e.r,0,Math.PI*2);
+  ctx.strokeStyle=`rgba(255,255,180,${e.life/.3})`;
+  ctx.lineWidth=4;
+  ctx.stroke();
+ }
+ for(const p of particles){
+  ctx.globalAlpha=Math.max(0,p.life/.9);
+  ctx.fillStyle=p.color;
+  ctx.beginPath();
+  ctx.arc(p.x,p.y,p.size,0,Math.PI*2);
+  ctx.fill();
+ }
+ ctx.globalAlpha=1;
+ for(const t of floatingTexts){
+  ctx.globalAlpha=Math.min(1,t.life*2);
+  ctx.font="bold 23px Arial";
+  ctx.textAlign="center";
+  ctx.fillStyle="#fff5a2";
+  ctx.shadowColor="#ffb32f";
+  ctx.shadowBlur=10;
+  ctx.fillText(t.text,t.x,t.y);
+  ctx.shadowBlur=0;
+ }
+ ctx.globalAlpha=1;
+}
+
+/* Shooting */
+
+function shoot(){
+ if(state!=="playing"||shotCooldown>0)return;
+ shotCooldown=.2;
+ const dx=mouse.x-CX;
+ const dy=mouse.y-CY;
+ const len=Math.hypot(dx,dy)||1;
+ const vx=dx/len,vy=dy/len;
+ const startX=CX+vx*42;
+ const startY=CY+vy*42;
+
+ // find closest collision with chain
+ let best=null;
+ let bestDist=Infinity;
+ for(let i=0;i<chain.length;i++){
+  const b=chain[i];
+  if(b.d<0||b.d>pathLength)continue;
+  const p=pointAt(b.d);
+  const projection=(p.x-startX)*vx+(p.y-startY)*vy;
+  if(projection<0)continue;
+  const perp=Math.abs((p.x-startX)*vy-(p.y-startY)*vx);
+  if(perp<2*R+5&&projection<bestDist){
+   best={i,d:b.d,p};
+   bestDist=projection;
+  }
+ }
+
+ if(!best){
+  sound(260,.08,"triangle",.04);
+  return;
+ }
+
+ const color=currentBall;
+ let insertIndex=best.i;
+ const previous=chain[best.i-1];
+ const next=chain[best.i];
+
+ if(previous&&Math.abs(previous.d-best.d)<Math.abs(next.d-best.d)){
+  insertIndex=best.i;
+ }
+ const insertD=best.d;
+
+ // push following balls backwards to create room
+ // [PERBAIKAN ChatGPT bagian 4: semula d-=GAP, diubah menjadi d+=GAP]
+ for(let i=insertIndex;i<chain.length;i++){
+  chain[i].d+=GAP;
+ }
+ chain.splice(insertIndex,0,{
+  d:insertD,color,pulse:Math.random()*5
+ });
+
+ sound(550,.07,"triangle");
+ currentBall=nextBall;
+ nextBall=randomBall();
+
+ checkMatches(insertIndex);
+ updateRemaining();
+}
+
+/* Matching and combo */
+
+function checkMatches(index){
+ let center=index;
+ let chainCombo=0;
+
+ while(chainCombo<8){
+  if(!chain[center])break;
+  const color=chain[center].color;
+  let left=center,right=center;
+
+  while(left>0&&chain[left-1].color===color)left--;
+  while(right<chain.length-1&&chain[right+1].color===color)right++;
+
+  const count=right-left+1;
+  if(count<3)break;
+
+  let sx=0,sy=0,n=0;
+  for(let i=left;i<=right;i++){
+   const p=pointAt(Math.max(0,chain[i].d));
+   sx+=p.x;sy+=p.y;n++;
+   burst(p.x,p.y,color,true);
+  }
+
+  chain.splice(left,count);
+  // close the gap after an explosion
+  // [PERBAIKAN ChatGPT bagian 4: semula d+=count*GAP, diubah menjadi d-=count*GAP]
+  for(let i=left;i<chain.length;i++){
+   chain[i].d-=count*GAP;
+  }
+
+  chainCombo++;
+  combo++;
+  comboTimer=2.2;
+
+  const bonus=chainCombo>1?chainCombo*100:0;
+  const points=count*100+bonus;
+  score+=points;
+
+  floatingTexts.push({
+   x:sx/n,y:sy/n,
+   text:chainCombo>1?"COMBO x"+chainCombo+" +"+points:"+"+points,
+   life:1.2
+  });
+
+  sound(700+chainCombo*150,.18,"sine");
+  shake=5;
+
+  center=Math.max(0,left-1);
+ }
+}
+
+/* Chain progress */
+
+function updateRemaining(){
+ remaining=chain.length;
+}
+
+function updateGame(dt){
+ if(state!=="playing")return;
+
+ shotCooldown=Math.max(0,shotCooldown-dt);
+ comboTimer=Math.max(0,comboTimer-dt);
+ if(comboTimer<=0)combo=0;
+
+ for(const b of chain)b.pulse+=dt;
+
+ for(const b of chain)b.d+=speed*dt;
+
+ if(chain.length&&chain[chain.length-1].d>=pathLength){
+  lives--;
+  sound(110,.4,"sawtooth",.1);
+  shake=12;
+
+  // push chain backwards to recover
+  for(const b of chain)b.d-=115;
+
+  if(lives<=0){
+   state="gameover";
+  }
+ }
+
+ updateRemaining();
+
+ if(chain.length===0){
+  if(level===1){
+   level=2;
+   initLevel();
+   state="levelup";
+   sound(900,.3,"sine");
+  }else{
+   state="win";
+   sound(1100,.5,"sine");
+  }
+ }
+}
+
+/* HUD */
+
+function drawHUD(){
+ ctx.fillStyle="rgba(0,15,22,.72)";
+ ctx.fillRect(0,0,W,62);
+
+ ctx.textAlign="left";
+ ctx.font="bold 20px Arial";
+ ctx.fillStyle="#ffffff";
+ ctx.fillText("🐸 KODOK PELANGI",18,28);
+
+ ctx.font="bold 14px Arial";
+ ctx.fillStyle="#a7f2dc";
+ ctx.fillText("SKOR  "+score,18,49);
+
+ ctx.textAlign="center";
+ ctx.fillStyle="#fff";
+ ctx.fillText("LEVEL "+level,400,25);
+ ctx.fillStyle="#a7f2dc";
+ ctx.fillText("SISA BOLA: "+remaining,400,47);
+
+ ctx.textAlign="right";
+ ctx.fillStyle="#ff8181";
+ ctx.font="bold 20px Arial";
+ ctx.fillText("♥ ".repeat(lives),780,30);
+
+ // next ball
+ ctx.fillStyle="#d7f4e5";
+ ctx.font="12px Arial";
+ ctx.fillText("BERIKUTNYA",780,51);
+ drawBall(744,43,nextBall,9,bgTime);
+
+ // loaded ammo panel
+ ctx.fillStyle="rgba(0,0,0,.45)";
+ ctx.fillRect(335,555,130,35);
+ ctx.textAlign="center";
+ ctx.font="12px Arial";
+ ctx.fillStyle="white";
+ ctx.fillText("AMUNISI",400,567);
+ drawBall(400,580,currentBall,10,bgTime);
+}
+
+/* Menu and overlays */
+
+function panel(title,subtitle,buttonText){
+ ctx.fillStyle="rgba(2,14,20,.78)";
+ ctx.fillRect(0,0,W,H);
+
+ ctx.textAlign="center";
+ ctx.shadowColor="#4cf5c0";
+ ctx.shadowBlur=20;
+ ctx.fillStyle="#a4ffcc";
+ ctx.font="bold 54px Arial";
+ ctx.fillText(title,400,190);
+ ctx.shadowBlur=0;
+
+ ctx.fillStyle="white";
+ ctx.font="20px Arial";
+ ctx.fillText(subtitle,400,245);
+
+ ctx.fillStyle="#176c57";
+ ctx.beginPath();
+ ctx.roundRect(270,310,260,62,15);
+ ctx.fill();
+ ctx.strokeStyle="#9affc9";
+ ctx.lineWidth=3;
+ ctx.stroke();
+
+ ctx.fillStyle="white";
+ ctx.font="bold 23px Arial";
+ ctx.fillText(buttonText,400,350);
+
+ ctx.font="14px Arial";
+ ctx.fillStyle="#c0e6d7";
+ ctx.fillText("Kodok Pelangi • Puzzle Shooting Game",400,425);
+}
+
+function drawOverlay(){
+ if(state==="menu"){
+  panel("KODOK PELANGI","Tembakkan bola dan pecahkan rantai warna!","MULAI BERMAIN");
+  ctx.font="15px Arial";
+  ctx.fillStyle="#e2fff0";
+  ctx.fillText("Cocokkan 3 bola atau lebih dengan warna sama",400,470);
+ }
+ if(state==="paused"){
+  panel("JEDA","Permainan sedang dihentikan.","LANJUTKAN");
+ }
+ if(state==="levelup"){
+  panel("LEVEL 1 SELESAI!","Level 2: lima warna dan spiral dua putaran.","MULAI LEVEL 2");
+ }
+ if(state==="gameover"){
+  panel("GAME OVER","Skor akhir: "+score,"MAIN LAGI");
+ }
+ if(state==="win"){
+  panel("KAMU MENANG!","Hebat! Semua bola telah dihancurkan. Skor: "+score,"MAIN LAGI");
+ }
+}
+
+/* Main rendering */
+
+function render(dt){
+ bgTime+=dt;
+ ctx.save();
+
+ if(shake>0){
+  ctx.translate((Math.random()-.5)*shake,(Math.random()-.5)*shake);
+  shake=Math.max(0,shake-25*dt);
+ }
+
+ drawBackground();
+ drawPath();
+ drawChain();
+ drawFrog();
+ drawEffects();
+
+ if(state!=="menu"){
+  drawHUD();
+ }
+
+ if(state!=="playing"){
+  drawOverlay();
+ }
+
+ ctx.restore();
+}
+
+/* Input */
+
+function getMouse(e){
+ const rect=canvas.getBoundingClientRect();
+ mouse.x=(e.clientX-rect.left)*W/rect.width;
+ mouse.y=(e.clientY-rect.top)*H/rect.height;
+}
+
+canvas.addEventListener("mousemove",e=>{
+ getMouse(e);
+ frogAngle=Math.atan2(mouse.y-CY,mouse.x-CX);
+});
+
+canvas.addEventListener("mousedown",e=>{
+ getMouse(e);
+ if(e.button===2){
+  swapBalls();
+  return;
+ }
+ if(e.button!==0)return;
+
+ if(state==="menu"||state==="gameover"||state==="win"){
+  startGame();
+ }else if(state==="paused"){
+  state="playing";
+ }else if(state==="levelup"){
+  state="playing";
+ }else{
+  shoot();
+ }
+});
+
+canvas.addEventListener("contextmenu",e=>e.preventDefault());
+
+function swapBalls(){
+ if(state!=="playing")return;
+ const temp=currentBall;
+ currentBall=nextBall;
+ nextBall=temp;
+ sound(360,.09,"triangle");
+}
+
+document.addEventListener("keydown",e=>{
+ if(e.code==="Space"){
+  e.preventDefault();
+  swapBalls();
+ }
+ if(e.key.toLowerCase()==="p"){
+  if(state==="playing")state="paused";
+  else if(state==="paused")state="playing";
+ }
+ if(e.key==="Enter"&&
+   ["menu","gameover","win","levelup"].includes(state)){
+  if(state==="levelup")state="playing";
+  else startGame();
+ }
+ if(e.key.toLowerCase()==="m")muted=!muted;
+});
+
+/* Touch support */
+
+canvas.addEventListener("touchstart",e=>{
+ e.preventDefault();
+ const t=e.touches[0];
+ getMouse(t);
+ frogAngle=Math.atan2(mouse.y-CY,mouse.x-CX);
+ if(state==="menu"||state==="gameover"||state==="win"){
+  startGame();
+ }else if(state==="levelup"){
+  state="playing";
+ }else if(state==="paused"){
+  state="playing";
+ }else{
+  shoot();
+ }
+},{passive:false});
+
+canvas.addEventListener("touchmove",e=>{
+ e.preventDefault();
+ getMouse(e.touches[0]);
+ frogAngle=Math.atan2(mouse.y-CY,mouse.x-CX);
+},{passive:false});
+
+/* Main loop */
+
+function loop(timestamp){
+ const dt=Math.min((timestamp-lastTime)/1000||0,.035);
+ lastTime=timestamp;
+
+ updateGame(dt);
+ updateEffects(dt);
+
+ if(chain.length){
+  for(const b of chain)b.d=Math.min(b.d,pathLength+100);
+ }
+
+ render(dt);
+ requestAnimationFrame(loop);
+}
+
+initLevel();
+state="menu";
+requestAnimationFrame(loop);
+
+</script>
+</body>
+</html>
